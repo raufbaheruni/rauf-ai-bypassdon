@@ -15,63 +15,64 @@ except ImportError:
 
 app = Flask(__name__)
 
-def annihilator_bypass(file_bytes):
+def real_camera_bypass(file_bytes):
     pil_img = Image.open(io.BytesIO(file_bytes))
     if pil_img.mode in ("RGBA", "P"):
         pil_img = pil_img.convert("RGB")
     img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-    max_size = 1200
+    max_size = 1500
     h, w = img.shape[:2]
     if max(h, w) > max_size:
         scale = max_size / max(h, w)
         img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
+    # बॉर्डर हटाना
     if img.shape[0] > 10 and img.shape[1] > 10:
         img = img[2:-2, 2:-2]
 
     h, w = img.shape[:2]
 
-    # --- ATTACK 1: MULTI-SCALE PYRAMID FREQUENCY DESTRUCTION ---
-    s1 = cv2.resize(img, (int(w*0.5), int(h*0.5)), interpolation=cv2.INTER_AREA)
-    s1 = np.clip(s1.astype(np.float32) + np.random.normal(0, 15.0, s1.shape), 0, 255).astype(np.uint8)
-    l1 = cv2.resize(s1, (w, h), interpolation=cv2.INTER_CUBIC)
-    
-    s2 = cv2.resize(img, (int(w*0.75), int(h*0.75)), interpolation=cv2.INTER_AREA)
-    s2 = np.clip(s2.astype(np.float32) + np.random.normal(0, 10.0, s2.shape), 0, 255).astype(np.uint8)
-    l2 = cv2.resize(s2, (w, h), interpolation=cv2.INTER_CUBIC)
-    
-    img_freq = cv2.addWeighted(img, 0.5, l1, 0.3, 0)
-    img_freq = cv2.addWeighted(img_freq, 0.8, l2, 0.2, 0)
+    # --- ATTACK 1: GEOMETRIC WARP (1 डिग्री घुमाना) ---
+    # AI की परफेक्ट सीधी ग्रिड तोड़ने के लिए
+    M = cv2.getRotationMatrix2D((w/2, h/2), 1.0, 1.0)
+    img_rot = cv2.warpAffine(img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+    # किनारों के 2% काट दें ताकि काला बॉर्डर न दिखे
+    cy, cx = int(h*0.02), int(w*0.02)
+    img_crop = img_rot[cy:h-cy, cx:w-cx]
+    h, w = img_crop.shape[:2]
 
-    # --- ATTACK 2: YCrCb LUMINANCE & CHROMA ANNIHILATION ---
-    ycrcb = cv2.cvtColor(img_freq, cv2.COLOR_BGR2YCrCb)
+    # --- ATTACK 2: CHROMATIC ABERRATION (असली लेंस इफेक्ट) ---
+    b, g, r = cv2.split(img_crop)
+    r_shifted = np.roll(r, 2, axis=1)
+    b_shifted = np.roll(b, -2, axis=1)
+    img_ca = cv2.merge((b_shifted, g, r_shifted))
+
+    # --- ATTACK 3: SIGNAL-DEPENDENT SENSOR NOISE (AI Killer) ---
+    ycrcb = cv2.cvtColor(img_ca, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(ycrcb)
 
-    # Y (रौशनी) पर भारी अटैक (AI डिटेक्टर यहीं पकड़ते हैं)
-    y_med = cv2.medianBlur(y, 3) 
-    y_poisson = np.random.poisson(y_med * 0.03) * 4
-    y_gauss = np.random.normal(0, 3.0, y.shape)
-    y_att = np.clip(y_med.astype(np.float32) + y_poisson + y_gauss, 0, 255).astype(np.uint8)
+    # Y (Luminance) पर असली कैमरे जैसा नॉइज़ (जहाँ रौशनी ज्यादा, वहाँ नॉइज़ ज्यादा)
+    y_float = y.astype(np.float32) / 255.0
+    noise_y = np.random.poisson(y_float * 50) * 2.0
+    y_att = np.clip(y.astype(np.float32) + noise_y, 0, 255).astype(np.uint8)
 
-    # Cr/Cb (कलर) पर भारी ब्लर और नॉइज़
-    cr_blur = cv2.GaussianBlur(cr, (7, 7), 0)
-    cb_blur = cv2.GaussianBlur(cb, (7, 7), 0)
-    cr_att = np.clip(cr_blur.astype(np.float32) + np.random.normal(0, 4.0, cr.shape), 0, 255).astype(np.uint8)
-    cb_att = np.clip(cb_blur.astype(np.float32) + np.random.normal(0, 4.0, cb.shape), 0, 255).astype(np.uint8)
+    # कलर (Cr/Cb) को हल्का ब्लर (Bayer Filter जैसा)
+    cr_blur = cv2.GaussianBlur(cr, (3, 3), 0)
+    cb_blur = cv2.GaussianBlur(cb, (3, 3), 0)
+    cr_att = np.clip(cr_blur.astype(np.float32) + np.random.normal(0, 1.5, cr.shape), 0, 255).astype(np.uint8)
+    cb_att = np.clip(cb_blur.astype(np.float32) + np.random.normal(0, 1.5, cb.shape), 0, 255).astype(np.uint8)
 
     ycrcb_att = cv2.merge((y_att, cr_att, cb_att))
     img_color_attack = cv2.cvtColor(ycrcb_att, cv2.COLOR_YCrCb2BGR)
 
-    # --- ATTACK 3: EXTREME JPEG GHOST (15% + 35%) ---
-    _, enc1 = cv2.imencode('.jpg', img_color_attack, [int(cv2.IMWRITE_JPEG_QUALITY), 15])
-    img_jpeg1 = cv2.imdecode(enc1, 1)
-    _, enc2 = cv2.imencode('.jpg', img_jpeg1, [int(cv2.IMWRITE_JPEG_QUALITY), 35])
-    img_ghost = cv2.imdecode(enc2, 1)
+    # --- ATTACK 4: LIGHT JPEG GHOST (40%) ---
+    _, enc_img = cv2.imencode('.jpg', img_color_attack, [int(cv2.IMWRITE_JPEG_QUALITY), 40])
+    img_ghost = cv2.imdecode(enc_img, 1)
 
-    # --- HD RECOVERY (वापस क्वालिटी लाना) ---
-    gaussian = cv2.GaussianBlur(img_ghost, (0, 0), sigmaX=0.8)
-    img_sharp = cv2.addWeighted(img_ghost.astype(np.float32), 1.5, gaussian.astype(np.float32), -0.5, 0)
+    # --- HD RECOVERY (Unsharp Mask) ---
+    gaussian = cv2.GaussianBlur(img_ghost, (0, 0), sigmaX=0.6)
+    img_sharp = cv2.addWeighted(img_ghost.astype(np.float32), 1.4, gaussian.astype(np.float32), -0.4, 0)
     final_img = np.clip(img_sharp, 0, 255).astype(np.uint8)
 
     # --- EXIF METADATA (iPhone 16 Pro) ---
@@ -105,7 +106,7 @@ def annihilator_bypass(file_bytes):
 
     temp_dir = tempfile.gettempdir()
     out_path = os.path.join(temp_dir, "BAHERUNI.jpg")
-    pil_final_img.save(out_path, "JPEG", quality=92, subsampling=2, exif=exif_bytes)
+    pil_final_img.save(out_path, "JPEG", quality=95, subsampling=2, exif=exif_bytes)
     
     return out_path
 
@@ -127,7 +128,7 @@ def upload():
     
     try:
         file_bytes = file.read()
-        output_path = annihilator_bypass(file_bytes)
+        output_path = real_camera_bypass(file_bytes)
         return send_file(output_path, as_attachment=True, download_name='BAHERUNI.jpg')
     except Exception as e:
         import traceback
