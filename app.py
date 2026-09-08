@@ -15,13 +15,13 @@ except ImportError:
 
 app = Flask(__name__)
 
-def god_mode_bypass(file_bytes):
+def annihilator_bypass(file_bytes):
     pil_img = Image.open(io.BytesIO(file_bytes))
     if pil_img.mode in ("RGBA", "P"):
         pil_img = pil_img.convert("RGB")
     img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
-    max_size = 1500
+    max_size = 1200
     h, w = img.shape[:2]
     if max(h, w) > max_size:
         scale = max_size / max(h, w)
@@ -32,42 +32,49 @@ def god_mode_bypass(file_bytes):
 
     h, w = img.shape[:2]
 
-    # Sub-Pixel Grid Break
-    img_s1 = cv2.resize(img, (int(w*0.98), int(h*0.98)), interpolation=cv2.INTER_AREA)
-    img_s2 = cv2.resize(img_s1, (int(w*1.02), int(h*1.02)), interpolation=cv2.INTER_CUBIC)
-    img_back = cv2.resize(img_s2, (w, h), interpolation=cv2.INTER_LANCZOS4)
+    # --- ATTACK 1: MULTI-SCALE PYRAMID FREQUENCY DESTRUCTION ---
+    s1 = cv2.resize(img, (int(w*0.5), int(h*0.5)), interpolation=cv2.INTER_AREA)
+    s1 = np.clip(s1.astype(np.float32) + np.random.normal(0, 15.0, s1.shape), 0, 255).astype(np.uint8)
+    l1 = cv2.resize(s1, (w, h), interpolation=cv2.INTER_CUBIC)
+    
+    s2 = cv2.resize(img, (int(w*0.75), int(h*0.75)), interpolation=cv2.INTER_AREA)
+    s2 = np.clip(s2.astype(np.float32) + np.random.normal(0, 10.0, s2.shape), 0, 255).astype(np.uint8)
+    l2 = cv2.resize(s2, (w, h), interpolation=cv2.INTER_CUBIC)
+    
+    img_freq = cv2.addWeighted(img, 0.5, l1, 0.3, 0)
+    img_freq = cv2.addWeighted(img_freq, 0.8, l2, 0.2, 0)
 
-    # Chroma Decoupling & DCT Noise
-    ycrcb = cv2.cvtColor(img_back, cv2.COLOR_BGR2YCrCb)
+    # --- ATTACK 2: YCrCb LUMINANCE & CHROMA ANNIHILATION ---
+    ycrcb = cv2.cvtColor(img_freq, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(ycrcb)
 
-    noise_cr_small = np.random.normal(0, 4.0, (h//8 + 1, w//8 + 1))
-    noise_cb_small = np.random.normal(0, 4.0, (h//8 + 1, w//8 + 1))
-    noise_cr = cv2.resize(noise_cr_small, (w, h), interpolation=cv2.INTER_NEAREST)
-    noise_cb = cv2.resize(noise_cb_small, (w, h), interpolation=cv2.INTER_NEAREST)
+    # Y (रौशनी) पर भारी अटैक (AI डिटेक्टर यहीं पकड़ते हैं)
+    y_med = cv2.medianBlur(y, 3) 
+    y_poisson = np.random.poisson(y_med * 0.03) * 4
+    y_gauss = np.random.normal(0, 3.0, y.shape)
+    y_att = np.clip(y_med.astype(np.float32) + y_poisson + y_gauss, 0, 255).astype(np.uint8)
 
+    # Cr/Cb (कलर) पर भारी ब्लर और नॉइज़
     cr_blur = cv2.GaussianBlur(cr, (7, 7), 0)
     cb_blur = cv2.GaussianBlur(cb, (7, 7), 0)
-
-    cr_att = np.clip(cr_blur.astype(np.float32) + noise_cr, 0, 255).astype(np.uint8)
-    cb_att = np.clip(cb_blur.astype(np.float32) + noise_cb, 0, 255).astype(np.uint8)
-
-    y_poisson = np.random.poisson(y * 0.01) * 2
-    y_att = np.clip(y.astype(np.float32) + y_poisson, 0, 255).astype(np.uint8)
+    cr_att = np.clip(cr_blur.astype(np.float32) + np.random.normal(0, 4.0, cr.shape), 0, 255).astype(np.uint8)
+    cb_att = np.clip(cb_blur.astype(np.float32) + np.random.normal(0, 4.0, cb.shape), 0, 255).astype(np.uint8)
 
     ycrcb_att = cv2.merge((y_att, cr_att, cb_att))
     img_color_attack = cv2.cvtColor(ycrcb_att, cv2.COLOR_YCrCb2BGR)
 
-    # Mild JPEG Ghost
-    _, enc_img = cv2.imencode('.jpg', img_color_attack, [int(cv2.IMWRITE_JPEG_QUALITY), 65])
-    img_ghost = cv2.imdecode(enc_img, 1)
+    # --- ATTACK 3: EXTREME JPEG GHOST (15% + 35%) ---
+    _, enc1 = cv2.imencode('.jpg', img_color_attack, [int(cv2.IMWRITE_JPEG_QUALITY), 15])
+    img_jpeg1 = cv2.imdecode(enc1, 1)
+    _, enc2 = cv2.imencode('.jpg', img_jpeg1, [int(cv2.IMWRITE_JPEG_QUALITY), 35])
+    img_ghost = cv2.imdecode(enc2, 1)
 
-    # HD Recovery
-    gaussian = cv2.GaussianBlur(img_ghost, (0, 0), sigmaX=0.6)
-    img_sharp = cv2.addWeighted(img_ghost.astype(np.float32), 1.3, gaussian.astype(np.float32), -0.3, 0)
+    # --- HD RECOVERY (वापस क्वालिटी लाना) ---
+    gaussian = cv2.GaussianBlur(img_ghost, (0, 0), sigmaX=0.8)
+    img_sharp = cv2.addWeighted(img_ghost.astype(np.float32), 1.5, gaussian.astype(np.float32), -0.5, 0)
     final_img = np.clip(img_sharp, 0, 255).astype(np.uint8)
 
-    # EXIF Metadata (iPhone 16 Pro)
+    # --- EXIF METADATA (iPhone 16 Pro) ---
     now = datetime.now().strftime("%Y:%m:%d %H:%M:%S")
     exif_dict = {
         "0th": {
@@ -98,7 +105,7 @@ def god_mode_bypass(file_bytes):
 
     temp_dir = tempfile.gettempdir()
     out_path = os.path.join(temp_dir, "BAHERUNI.jpg")
-    pil_final_img.save(out_path, "JPEG", quality=98, subsampling=2, exif=exif_bytes)
+    pil_final_img.save(out_path, "JPEG", quality=92, subsampling=2, exif=exif_bytes)
     
     return out_path
 
@@ -120,7 +127,7 @@ def upload():
     
     try:
         file_bytes = file.read()
-        output_path = god_mode_bypass(file_bytes)
+        output_path = annihilator_bypass(file_bytes)
         return send_file(output_path, as_attachment=True, download_name='BAHERUNI.jpg')
     except Exception as e:
         import traceback
